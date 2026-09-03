@@ -73,6 +73,7 @@ jobs:
         with:
           path: ~/.gradle
           key: gradle-oss-${{ hashFiles('**/*.gradle.kts') }}
+
       - name: Gradle Build
         env:
           BUILD_PLUGIN: none
@@ -80,12 +81,65 @@ jobs:
           echo "sdk.dir=${ANDROID_HOME}" > local.properties
           echo "ndk.dir=${ANDROID_HOME}/ndk/25.0.8775105" >> local.properties
           export LOCAL_PROPERTIES="${{ secrets.LOCAL_PROPERTIES }}"
+      
           ./run init action gradle
           ./gradlew app:assemblePreviewRelease
-          APK=$(find app/build/outputs/apk -name '*arm64-v8a*.apk')
-          APK=$(dirname $APK)
-          echo "APK=$APK" >> $GITHUB_ENV
-      - uses: actions/upload-artifact@v4
+      
+      - name: Sign APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -e
+      
+          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/nekobox-self.jks"
+      
+          UNSIGNED_APK=$(find app/build/outputs/apk \
+            -type f \
+            -name '*arm64-v8a*.apk' \
+            | head -n 1)
+      
+          echo "Unsigned APK: $UNSIGNED_APK"
+          test -f "$UNSIGNED_APK"
+      
+          BUILD_TOOLS=$(find "$ANDROID_HOME/build-tools" \
+            -mindepth 1 -maxdepth 1 -type d \
+            | sort -V \
+            | tail -n 1)
+      
+          echo "Build tools: $BUILD_TOOLS"
+      
+          mkdir -p "$RUNNER_TEMP/signed"
+      
+          ALIGNED_APK="$RUNNER_TEMP/signed/nekobox-tailscale-aligned.apk"
+          SIGNED_APK="$RUNNER_TEMP/signed/nekobox-tailscale-arm64-v8a.apk"
+      
+          "$BUILD_TOOLS/zipalign" \
+            -p \
+            -f \
+            4 \
+            "$UNSIGNED_APK" \
+            "$ALIGNED_APK"
+      
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks "$RUNNER_TEMP/nekobox-self.jks" \
+            --ks-pass "pass:$KEYSTORE_PASSWORD" \
+            --ks-key-alias "$KEY_ALIAS" \
+            --key-pass "pass:$KEY_PASSWORD" \
+            --out "$SIGNED_APK" \
+            "$ALIGNED_APK"
+      
+          "$BUILD_TOOLS/apksigner" verify \
+            --verbose \
+            --print-certs \
+            "$SIGNED_APK"
+      
+          echo "APK=$SIGNED_APK" >> "$GITHUB_ENV"
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
         with:
           name: APKs
           path: ${{ env.APK }}
